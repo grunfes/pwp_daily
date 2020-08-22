@@ -1,0 +1,150 @@
+<?php
+
+/**
+ * Implements hook_permission().
+ */
+function pwp_daily_permission() {
+  return [
+    'access pwp_daily game' => [
+      'title' => t('Access content for the Daily Game.'),
+    ],
+    'play pwp_daily game' => [
+      'title' => t('Save picks for Daily Game.'),
+    ],
+  ];
+}
+
+
+/**
+ * Implements hook_menu().
+ */
+function pwp_daily_menu() {
+  return [
+    'pwp_daily/data/fetch' => [
+      'title' => 'PWP Daily Data Fetch',
+      'page callback' => 'pwp_daily_data_fetch',
+      'access arguments' => ['access pwp_daily game'],
+      'file' => 'includes/data-fetch.menu.inc',
+      'type' => MENU_CALLBACK,
+    ],
+    'pwp_daily/data/save' => [
+      'title' => 'PWP Daily Data Save',
+      'page callback' => 'pwp_daily_data_save',
+      'access callback' => TRUE,
+      'file' => 'includes/data-save.menu.inc',
+      'type' => MENU_CALLBACK,
+    ],
+  ];
+}
+
+/**
+ * Implements hook_theme().
+ */
+function pwp_daily_theme($existing, $type, $theme, $path) {
+  return [
+    'pwp_daily_game' => [
+      'render element' => 'content',
+      'template' => 'pwp_daily_game',
+      'path' => pwp_daily_helpers::getPath('templates'),
+    ],
+  ];
+}
+
+/**
+ * Implements hook_block_info().
+ */
+function pwp_daily_block_info() {
+  return [
+    'daily_game' => [
+      'info' => t('Daily Game'),
+      'cache' => DRUPAL_NO_CACHE,
+    ],
+  ];
+}
+
+/**
+ * Implements hook_block_view().
+ */
+function pwp_daily_block_view($delta = '') {
+  switch ($delta) {
+    case 'daily_game':
+      $block['content'] = [
+        '#theme' => 'pwp_daily_game',
+        '#attached' => [
+          'css' => [
+            pwp_daily_helpers::getPath('css/styles.css'),
+          ],
+          'js' => array_merge(
+            pwp_daily_helpers::getSharedJSLibraries(),
+            [
+              [
+                'type' => 'file',
+                'data' => pwp_daily_helpers::getPath('js/pwp_daily_game/main.js'),
+                'scope' => 'footer',
+              ],
+            ]
+          ),
+        ],
+      ];
+
+      return $block;
+  }
+}
+
+/**
+ * Implements hook_field_widget_form_alter().
+ */
+function pwp_daily_field_widget_form_alter(&$element, &$form_state, $context) {
+  $fieldName = $context['field']['field_name'];
+  if ($fieldName === 'field_daily_teams') {
+    $dailyTeamsFormState = pwp_daily_helpers::getInlineEntityFormState($element, $form_state);
+
+    if ($dailyTeamsFormState['form'] === 'add') {
+      $title = 'Team ' . strtoupper(pwp_daily_constants::TEAM_KEYS[count($dailyTeamsFormState['entities'])]);
+      $element['form']['title']['#default_value'] = $title;
+    }
+  }
+}
+
+/**
+ * Implements hook_cron().
+ */
+function pwp_daily_cron() {
+  $storedDateValue = variable_get(\pwp_daily_constants::DAILY_GAME_DATE_VARIABLE);
+  $now = new \DateObject();
+  $stored = $storedDateValue === NULL ? $now : new \DateObject($storedDateValue);
+
+  if (!$storedDateValue || intval($now->format('N')) !== intval($stored->format('N'))) {
+    try {
+      if (
+        ($dailyGame = variable_get(\pwp_daily_constants::DAILY_GAME_VARIABLE)) &&
+        ($dailyShow = entity_load_single('daily_show', $dailyGame))
+      ) {
+        $dailyShowWrapper = $dailyShow->wrapper();
+        $dailyShowWrapper->field_daily_closed->set('1');
+        $dailyShowWrapper->save();
+      }
+
+      $query = new \EntityFieldQuery();
+      $query
+        ->entityCondition('entity_type', 'daily_show')
+        ->fieldCondition('field_daily_closed', 'value', '0');
+
+      $result = $query->execute();
+      if (isset($result['daily_show'])) {
+        $showEntityIds = array_keys($result['daily_show']);
+        $rndIdx = rand(0, count($showEntityIds) - 1);
+
+        variable_set(\pwp_daily_constants::DAILY_GAME_VARIABLE, $showEntityIds[$rndIdx]);
+        variable_set(\pwp_daily_constants::DAILY_GAME_DATE_VARIABLE, $now->format('c'));
+
+        watchdog('pwp_daily', t('Daily Game @id set.', array(
+          '@id' => $showEntityIds[$rndIdx],
+        )));
+      }
+    }
+    catch (\Exception $exception) {
+      watchdog('pwp_daily', $exception->getMessage(), NULL, WATCHDOG_WARNING);
+    }
+  }
+}

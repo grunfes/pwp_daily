@@ -1,0 +1,48 @@
+<?php
+
+/**
+ * @file
+ * Installation file for auto blcok scheduler module.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function auto_block_scheduler_schema() {
+  $schema['auto_block_scheduler'] = array(
+    'description' => 'Stores example person entries for demonstration purposes.',
+    'fields' => array(
+      'bid' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => "Forign key from block table",
+      ),
+      'region' => array(
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+        'description' => 'region of the block.',
+      ),
+      'publish_on' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'scheduler publish on.',
+      ),
+      'unpublish_on' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'unscheduler unpublish on.',
+      ),
+    ),
+    'primary key' => array('bid'),
+    'indexes' => array(
+      'auto_block_scheduler_publish_on' => array('publish_on'),
+      'auto_block_scheduler_unpublish_on' => array('unpublish_on'),
+    ),
+  );
+  return $schema;
+}

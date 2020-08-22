@@ -1,0 +1,8 @@
+<?php
+
+/**
+ * @file
+ * Code for the Daily Entity Types feature.
+ */
+
+include_once 'daily_entity_types.features.inc';

@@ -1,0 +1,547 @@
+<?php
+
+/**
+ * @file
+ * Scheduler publishes and unpublishes block on dates specified by the user.
+ */
+
+// The default format to be used in auto blcok scheduler block.
+define('AUTO_BLOCK_SCHEDULER_DATE_FORMAT', 'Y-m-d h:i:s');
+
+/**
+ * Implements hook_help().
+ */
+function auto_block_scheduler_help($path, $arg) {
+  $help = '';
+  switch ($path) {
+    case 'admin/help#auto_block_scheduler':
+      $help = check_markup(file_get_contents(dirname(__FILE__) . "/README.txt"));
+      break;
+  }
+  return $help;
+}
+
+/**
+ * Implements hook_menu().
+ */
+function auto_block_scheduler_menu() {
+  $items['admin/structure/auto_block_scheduler/manage'] = array(
+    'title' => 'Auto block scheduler lists',
+    'page callback' => 'auto_block_scheduler_list',
+    'access arguments' => array('administer blocks'),
+    'description' => 'Display auto block scheduler lists',
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_form_FORMID_alter().
+ *
+ * Add auto block scheduler visibility options to block configuration form.
+ *
+ * @see block_admin_configure()
+ */
+function auto_block_scheduler_form_block_admin_configure_alter(&$form, &$form_state, $form_id) {
+  auto_block_scheduler_option_for_block($form, $form_state, $form_id);
+}
+
+/**
+ * It is used to add scheduler option in block create/edit form.
+ *
+ * @param array $form
+ *   Nested array of form elements that comprise the form.
+ * @param array $form_state
+ *   A keyed array containing the current state of the form.
+ * @param string $form_id
+ *   String representing the name of the form itself.
+ */
+function auto_block_scheduler_option_for_block(&$form, &$form_state, $form_id) {
+  $theme_default = variable_get('theme_default', 'bartik');
+  $scheduled_block = array();
+  // To confirm its for edit form.
+  if (isset($form_state['build_info']['args']) && count($form_state['build_info']['args']) > 1) {
+    $block_object = auto_block_scheduler_get_bid($form_state['build_info']['args']['0'], $form_state['build_info']['args']['1']);
+    $scheduled_block = auto_block_scheduler_enabled_block($block_object[$theme_default]);
+  }
+  // Get auto scheduler date format.
+  $now = format_date(REQUEST_TIME, 'custom', AUTO_BLOCK_SCHEDULER_DATE_FORMAT);
+
+  $form['visibility']['scheduler'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Scheduler'),
+    '#collapsible' => TRUE,
+    '#collapsed' => TRUE,
+    '#group' => 'visibility',
+    '#weight' => 20,
+    '#attached' => array(
+      'js' => array(drupal_get_path('module', 'auto_block_scheduler') . '/js/auto_block_scheduler.js'),
+    ),
+  );
+  $form['visibility']['scheduler']['scheduler_start'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Enable scheduler for publish'),
+    '#default_value' => (isset($scheduled_block['publish_on']) && $scheduled_block['publish_on']) ? 1 : 0,
+  );
+  $form['visibility']['scheduler']['scheduler_publish_start'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Publish on'),
+    '#description' => t('Format: @time. Enter the date to publishing.', array('@time' => $now)),
+    '#default_value' => (isset($scheduled_block['publish_on']) && $scheduled_block['publish_on']) ? format_date($scheduled_block['publish_on'], 'custom', AUTO_BLOCK_SCHEDULER_DATE_FORMAT) : '',
+    '#states' => array(
+      'visible' => array(
+        ':input[name="scheduler_start"]' => array('checked' => TRUE),
+      ),
+    ),
+  );
+
+  $form['visibility']['scheduler']['scheduler_end'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Enable scheduler for unpublish'),
+    '#default_value' => (isset($scheduled_block['unpublish_on']) && $scheduled_block['unpublish_on']) ? 1 : 0,
+  );
+  $form['visibility']['scheduler']['scheduler_publish_end'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Unpublish on'),
+    '#description' => t('Format: @time. Enter the date to un-publishing.', array('@time' => $now)),
+    '#default_value' => (isset($scheduled_block['unpublish_on']) && $scheduled_block['unpublish_on']) ? format_date($scheduled_block['unpublish_on'], 'custom', AUTO_BLOCK_SCHEDULER_DATE_FORMAT) : '',
+    '#states' => array(
+      'visible' => array(
+        ':input[name="scheduler_end"]' => array('checked' => TRUE),
+      ),
+    ),
+  );
+
+  $form['#submit'][] = '_auto_block_scheduler_configure_submit';
+  $form['#validate'][] = '_auto_block_scheduler_configure_validate';
+}
+
+/**
+ * It is used to validate the scheduler configurations.
+ *
+ * @param array $form
+ *   Nested array of form elements that comprise the form.
+ * @param array $form_state
+ *   A keyed array containing the current state of the form.
+ *
+ * @see auto_block_scheduler_option_for_block()
+ */
+function _auto_block_scheduler_configure_validate($form, &$form_state) {
+  $form_values = $form_state['values'];
+  $publish_on = $form_values['scheduler_publish_start'];
+  $unpublish_on = $form_values['scheduler_publish_end'];
+
+  if ($form_values['scheduler_start'] && empty($publish_on)) {
+    form_set_error('scheduler_publish_start', t("The 'publish on' value is required"));
+  }
+  if ($form_values['scheduler_end'] && empty($unpublish_on)) {
+    form_set_error('scheduler_publish_end', t("The 'unpublish on' value is required"));
+  }
+  if (!empty($publish_on) && !is_numeric($publish_on) && !is_array($publish_on)) {
+    $publishtime = strtotime($publish_on);
+    if ($publishtime === FALSE) {
+      form_set_error('scheduler_publish_start', t("The 'publish on' value does not match the expected format of %time",
+      array('%time' => auto_block_scheduler_date_format())));
+    }
+    elseif ($publishtime && $publishtime < REQUEST_TIME) {
+      form_set_error('scheduler_publish_start', t("The 'publish on' date must be in the future"));
+    }
+  }
+  if (!empty($unpublish_on) && !is_numeric($unpublish_on) && !is_array($unpublish_on)) {
+    $unpublishtime = strtotime($unpublish_on);
+    if ($unpublishtime === FALSE) {
+      form_set_error('scheduler_publish_end', t("The 'unpublish on' value does not match the expected format of %time",
+      array('%time' => auto_block_scheduler_date_format())));
+    }
+    elseif ($unpublishtime && $unpublishtime < REQUEST_TIME) {
+      form_set_error('scheduler_publish_end', t("The 'unpublish on' date must be in the future"));
+    }
+  }
+  if (isset($publishtime) && isset($unpublishtime) && $unpublishtime < $publishtime) {
+    form_set_error('scheduler_publish_end', t("The 'unpublish on' date must be later than the 'publish on' date."));
+  }
+}
+
+/**
+ * Form submission handler for block admin configuration.
+ *
+ * @see auto_block_scheduler_block_admin_configure_alter()
+ */
+function _auto_block_scheduler_configure_submit($form, &$form_state) {
+  $data = array();
+  $show_message = FALSE;
+  $form_values = $form_state['values'];
+  $block_object = auto_block_scheduler_get_bid($form_values['module'], $form_values['delta']);
+  $data['publish_on'] = ($form_values['scheduler_start'] == 1) ? strtotime($form_values['scheduler_publish_start']) : 0;
+  $data['unpublish_on'] = ($form_values['scheduler_end'] == 1) ? strtotime($form_values['scheduler_publish_end']) : 0;
+
+  foreach ($form_values['regions'] as $theme_name => $regions) {
+    $data['region'] = $regions;
+    $data['bid'] = $block_object[$theme_name];
+
+    // Delete entry in scheduler block once user disable the scheduler.
+    if ($form_values['scheduler_start'] == 0 && $form_values['scheduler_end'] == 0) {
+      db_delete('auto_block_scheduler')->condition('bid', $block_object[$theme_name])->execute();
+    }
+    else {
+      db_merge('auto_block_scheduler')
+          ->key(array('bid' => $block_object[$theme_name]))
+          ->fields($data)
+          ->execute();
+    }
+    // Trigger unpublish for a block once user enabled scheduler.
+    if ($form_values['scheduler_start'] == 1) {
+      $show_message = TRUE;
+      _auto_block_scheduler_unpublish($block_object[$theme_name]);
+    }
+  }
+  if ($show_message) {
+    drupal_set_message(t("This block is unpublished and will be published @time",
+    array('@time' => auto_block_scheduler_date_format($data['publish_on']))));
+  }
+}
+
+/**
+ * Implements hook_form_FORMID_alter().
+ *
+ * @see block_admin_display_form()
+ */
+function auto_block_scheduler_form_block_admin_display_form_alter(&$form, &$form_state, $form_id) {
+  $form['#submit'][] = 'auto_block_scheduler_display_scheduler_submit';
+}
+
+/**
+ * Form submission handler for admin block display section.
+ *
+ * @see auto_block_scheduler_form_block_admin_display_form_alter()
+ */
+function auto_block_scheduler_display_scheduler_submit($form, &$form_state) {
+  $theme_default = variable_get('theme_default', 'bartik');
+  $transaction = db_transaction();
+  try {
+    foreach ($form_state['values']['blocks'] as $block) {
+      if ($block['region'] != -1) {
+        $block_object = auto_block_scheduler_get_bid($block['module'], $block['delta']);
+        if (count($block_object)) {
+          $scheduled_block = auto_block_scheduler_enabled_block($block_object[$theme_default]);
+          if ($scheduled_block && count($scheduled_block)) {
+            _auto_block_scheduler_unpublish($block_object[$theme_default]);
+            drupal_set_message(t("This block is unpublished and will be published @time",
+            array('@time' => auto_block_scheduler_date_format($scheduled_block['publish_on']))), 'warning');
+          }
+        }
+      }
+    }
+  }
+  catch (Exception $e) {
+    $transaction->rollback();
+    watchdog_exception('auto_block_scheduler', $e);
+    throw $e;
+  }
+}
+
+/**
+ * Implements hook_cron().
+ */
+function auto_block_scheduler_cron() {
+
+  // During cron runs we do not want i18n_sync to make any changes to the
+  // translation blocks, as this affects processing later in the same cron job.
+  // Hence we save the i18n_sync state here, turn it off for the duration of
+  // scheduler block cron processing, then restore the setting afterwards.
+  // @see https://drupal.org/node/1182450
+  // @see https://drupal.org/node/2136557
+  if (module_exists('i18n_sync')) {
+    $i18n_sync_saved_state = i18n_sync();
+    i18n_sync(FALSE);
+  }
+
+  // Use drupal_static so that any function can find out if we are running
+  // tirgger cron. Set the default value to FALSE, then turn on the flag.
+  $auto_block_scheduler_cron = &drupal_static(__FUNCTION__, FALSE);
+  $auto_block_scheduler_cron = TRUE;
+
+  _auto_block_scheduler_publish_cron();
+  _auto_block_scheduler_unpublish_cron();
+  // Reset the static scheduler_cron flag.
+  drupal_static_reset(__FUNCTION__);
+
+  // Restore the i18n_sync state.
+  module_exists('i18n_sync') ? i18n_sync($i18n_sync_saved_state) : NULL;
+}
+
+/**
+ * Publish scheduled blocks.
+ */
+function _auto_block_scheduler_publish_cron() {
+  $query = db_select('auto_block_scheduler', 'bs');
+  $query->fields('bs', array('bid', 'region'));
+  $query->join('block', 'b', 'b.bid = bs.bid');
+  $query->condition('bs.publish_on', 0, '>');
+  $query->condition('bs.publish_on', REQUEST_TIME, '<=');
+  $query->condition('b.status', 0);
+  $query_result = $query->execute()->fetchAll();
+  if (count($query_result)) {
+    foreach ($query_result as $key => $values) {
+      _auto_block_scheduler_publish($query_result[$key]->bid, $query_result[$key]->region);
+    }
+  }
+}
+
+/**
+ * Method used to publish scheduled block by bid.
+ *
+ * @param int $bid
+ *   Block bid.
+ * @param string $region
+ *   Block region machine name.
+ *
+ * @throws Exception
+ */
+function _auto_block_scheduler_publish($bid, $region) {
+  $transaction = db_transaction();
+  try {
+    db_update('block')
+        ->fields(array(
+          'status' => 1,
+          'region' => $region,
+        ))
+        ->condition('bid', $bid)
+        ->execute();
+  }
+  catch (Exception $e) {
+    $transaction->rollback();
+    watchdog_exception('auto_block_scheduler', $e);
+    throw $e;
+  }
+}
+
+/**
+ * Unpublish scheduled blocks.
+ */
+function _auto_block_scheduler_unpublish_cron() {
+  $query = db_select('auto_block_scheduler', 'bs');
+  $query->fields('bs', array('bid'));
+  $query->join('block', 'b', 'b.bid = bs.bid');
+  $query->condition('bs.unpublish_on', 0, '>');
+  $query->condition('bs.unpublish_on', REQUEST_TIME, '<=');
+  $query->condition('b.status', 1);
+  $query_result = $query->execute()->fetchAll();
+  foreach ($query_result as $key => $values) {
+    _auto_block_scheduler_unpublish($query_result[$key]->bid);
+  }
+}
+
+/**
+ * Method used to unpublish scheduled block by bid.
+ *
+ * @param int $bid
+ *   Block bid.
+ *
+ * @return bool
+ *   TRUE or FALSE.
+ *
+ * @throws Exception
+ */
+function _auto_block_scheduler_unpublish($bid) {
+  $result = FALSE;
+  $transaction = db_transaction();
+  try {
+    $result = db_update('block')
+        ->fields(array(
+          'status' => 0,
+          'region' => -1,
+        ))
+        ->condition('bid', $bid)
+        ->execute();
+  }
+  catch (Exception $e) {
+    $transaction->rollback();
+    watchdog_exception('auto_block_scheduler', $e);
+    throw $e;
+  }
+  return $result;
+}
+
+/**
+ * Method used to unpublish scheduled block by bid.
+ *
+ * @param int $bid
+ *   Block bid.
+ *
+ * @return array
+ *   Associate array of publish and unpublish dates.
+ */
+function auto_block_scheduler_enabled_block($bid) {
+  $results = db_select('auto_block_scheduler', 'bs')
+      ->fields('bs', array('publish_on', 'unpublish_on'))
+      ->condition('bid', $bid)
+      ->execute()
+      ->fetchAssoc();
+  return $results;
+}
+
+/**
+ * Method used to fetch bid by module and delta values.
+ *
+ * @param string $module
+ *   Module name.
+ * @param string $delta
+ *   Delta value.
+ *
+ * @return array
+ *   Associate array of theme and blockid.
+ */
+function auto_block_scheduler_get_bid($module, $delta) {
+  $results = array();
+  $query_results = db_select('block', 'b')
+      ->fields('b', array('bid', 'theme'))
+      ->condition('module', $module)
+      ->condition('delta', $delta)
+      ->execute()
+      ->fetchAll();
+  if (count($query_results)) {
+    foreach ($query_results as $key => $value) {
+      $results[$query_results[$key]->theme] = $query_results[$key]->bid;
+    }
+  }
+  return $results;
+}
+
+/**
+ * Implements hook_form_FORMID_alter().
+ *
+ * @see block_custom_block_delete()
+ */
+function auto_block_scheduler_form_block_custom_block_delete_alter(&$form, &$form_state, $form_id) {
+  array_unshift($form['#submit'], 'auto_block_scheduler_custom_delete_submit');
+}
+
+/**
+ * Form submission handler for custom block delete.
+ *
+ * @see auto_block_scheduler_form_block_custom_block_delete_alter()
+ */
+function auto_block_scheduler_custom_delete_submit($form, &$form_state) {
+  if ($form_state['values']['op'] == 'Delete') {
+    $query_results = db_select('block', 'b')
+        ->fields('b', array('bid'))
+        ->condition('delta', $form_state['values']['bid'])
+        ->execute()
+        ->fetchAll();
+    if (count($query_results)) {
+      foreach ($query_results as $key => $value) {
+        db_delete('auto_block_scheduler')->condition('bid', $query_results[$key]->bid)->execute();
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_form_FORMID_alter().
+ *
+ * Adds scheduler visibility options to block configuration form.
+ *
+ * @see block_add_block_form()
+ */
+function auto_block_scheduler_form_block_add_block_form_alter(&$form, &$form_state, $form_id) {
+  auto_block_scheduler_option_for_block($form, $form_state, $form_id);
+}
+
+/**
+ * Displays a list of blocks that are scheduled for publish and unpublish.
+ *
+ * This will appear as a tab on the content admin page ('admin/content').
+ */
+function auto_block_scheduler_list() {
+  $header = array(
+    array(
+      'data' => t('Delta'),
+      'field' => 'b.delta',
+    ),
+    array(
+      'data' => t('Module'),
+      'field' => 'b.module',
+    ),
+    array(
+      'data' => t('Theme'),
+      'field' => 'b.theme',
+    ),
+    array(
+      'data' => t('Region'),
+      'field' => 'b.region',
+    ),
+    array(
+      'data' => t('Status'),
+      'field' => 'b.status',
+    ),
+    array(
+      'data' => t('Publish on'),
+      'field' => 'bs.publish_on',
+    ),
+    array(
+      'data' => t('Unpublish on'),
+      'field' => 'bs.unpublish_on',
+    ),
+    array(
+      'data' => t('Operations'),
+    ),
+  );
+
+  // Default ordering.
+  if (!isset($_GET['order']) && !isset($_GET['sort'])) {
+    $_GET['order'] = t('Publish on');
+    $_GET['sort'] = 'ASC';
+  }
+
+  $query = db_select('auto_block_scheduler', 'bs')->extend('PagerDefault');
+  $query->limit(50);
+  $query->addJoin('INNER', 'block', 'b', 'b.bid = bs.bid');
+  $query->fields('bs', array('bid', 'region', 'publish_on', 'unpublish_on'));
+  $query->fields('b', array('status', 'delta', 'module', 'theme'));
+
+  $query = $query->extend('TableSort')->orderByHeader($header);
+  $result = $query->execute();
+  $destination = drupal_get_destination();
+  $rows = $ops = array();
+
+  foreach ($result as $block) {
+    if ($block->module) {
+      $ops = array(
+        l(t('configure'), 'admin/structure/block/manage/' . $block->module . '/' . $block->delta . '/configure', array('query' => $destination)),
+      );
+    }
+
+    $rows[] = array(
+      ($block->delta ? l($block->delta, "admin/structure/block/manage/$block->module/$block->delta/configure") : t('Missing scheduled information for block @bid', array('@bid' => $block->bid))),
+      ($block->module ? $block->module : 'No Module'),
+      ($block->theme ? $block->theme : ''),
+      ($block->region != -1) ? $block->region : ' -None- ',
+      ($block->module ? ($block->status ? t('Published') : t('Unpublished')) : ''),
+      ($block->publish_on ? format_date($block->publish_on, 'custom', AUTO_BLOCK_SCHEDULER_DATE_FORMAT) : '&nbsp;'),
+      ($block->unpublish_on ? format_date($block->unpublish_on, 'custom', AUTO_BLOCK_SCHEDULER_DATE_FORMAT) : '&infin;'),
+      implode(' ', $ops),
+    );
+  }
+  if (count($rows) && ($pager = theme('pager'))) {
+    $rows[] = array(
+      array(
+        'data' => $pager,
+        'colspan' => count($rows['0']),
+      ),
+    );
+  }
+  $content['scheduled_block_list'] = array(
+    '#theme' => 'table',
+    '#header' => $header,
+    '#rows' => $rows,
+    '#empty' => t('There are no scheduled blocks.'),
+  );
+  return $content;
+}
+
+/**
+ * This function used to return auto block scheduler date format.
+ */
+function auto_block_scheduler_date_format($timestamp = REQUEST_TIME) {
+  return format_date($timestamp, 'custom', AUTO_BLOCK_SCHEDULER_DATE_FORMAT);
+}

@@ -1,0 +1,10 @@
+name = Auto block scheduler
+description = Publish and unpublish the block based on time interval
+core = 7.x
+
+; Information added by Drupal.org packaging script on 2016-05-07
+version = "7.x-1.0"
+core = "7.x"
+project = "auto_block_scheduler"
+datestamp = "1462590845"
+
